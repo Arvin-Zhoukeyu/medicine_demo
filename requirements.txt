@@ -1,0 +1,2 @@
+# Python 3.10+ is required. The server and key checker use only the Python standard library.
+# No pip packages need to be installed.
