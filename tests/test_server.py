@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from server import endpoint, image_data_url, parse_image, parse_plan
+from leaflet_guidance import extract_leaflet_guidance
 
 
 class ServerTests(unittest.TestCase):
@@ -87,6 +88,46 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(send.call_count, 1)
         self.assertEqual(result['documentType'], 'leaflet')
         self.assertEqual(result['medications'], [])
+
+    def test_real_leaflet_ocr_generates_grounded_as_needed_draft(self):
+        source = (Path(__file__).resolve().parent / 'fixtures' / 'ibuprofen_leaflet_ocr.txt').read_text(encoding='utf-8')
+        reply = {'choices': [{'message': {'content': json.dumps({
+            'name': {'value': '布洛芬颗粒', 'evidence': '通用名称：布洛芬颗粒'},
+            'doseOptions': [
+                {'group': '4~8岁儿童', 'dose': '0.5', 'unit': '包', 'evidence': '4~8岁儿童，一次0.5包'},
+                {'group': '8岁以上儿童及成人', 'dose': '1', 'unit': '包', 'evidence': '8岁以上儿童及成人，一次1包'},
+            ],
+            'interval': {'minHours': 4, 'maxHours': 6, 'evidence': '间隔4~6小时重复用药1次'},
+            'maxPer24h': {'count': 4, 'evidence': '24小时不超过4次'},
+            'durationLimits': [
+                {'purpose': 'pain', 'maxDays': 5, 'evidence': '用于止痛不得超过5天'},
+                {'purpose': 'fever', 'maxDays': 3, 'evidence': '用于解热不得超过3天'},
+            ],
+            'conditionalEvidence': '若持续疼痛或发热，可间隔4~6小时重复用药1次',
+        }, ensure_ascii=False)}}]}
+        cfg = {'DASHSCOPE_API_KEY': 'test-key', 'DASHSCOPE_BASE_URL': 'https://dashscope.aliyuncs.com/compatible-mode/v1', 'DASHSCOPE_MODEL': 'qwen-plus'}
+        with patch('leaflet_guidance.urlopen', return_value=io.BytesIO(json.dumps(reply, ensure_ascii=False).encode())):
+            result = extract_leaflet_guidance(source, cfg, endpoint)
+        self.assertEqual(result['name'], '布洛芬颗粒')
+        self.assertEqual(result['mode'], 'asNeeded')
+        self.assertEqual(result['doseOptions'][1]['dose'], '1')
+        self.assertEqual(result['interval']['minHours'], 4)
+        self.assertEqual(result['maxPer24h']['count'], 4)
+        self.assertEqual(result['durationLimits']['fever']['maxDays'], 3)
+
+    def test_leaflet_rejects_unquoted_dose_and_recovers_from_ocr(self):
+        source = (Path(__file__).resolve().parent / 'fixtures' / 'ibuprofen_leaflet_ocr.txt').read_text(encoding='utf-8')
+        reply = {'choices': [{'message': {'content': json.dumps({
+            'name': {'value': '布洛芬颗粒', 'evidence': '通用名称：布洛芬颗粒'},
+            'doseOptions': [{'group': '8岁以上儿童及成人', 'dose': '2', 'unit': '包', 'evidence': '8岁以上儿童及成人，一次1包'}],
+            'interval': {}, 'maxPer24h': {}, 'durationLimits': [], 'conditionalEvidence': '',
+        }, ensure_ascii=False)}}]}
+        cfg = {'DASHSCOPE_API_KEY': 'test-key', 'DASHSCOPE_BASE_URL': 'https://dashscope.aliyuncs.com/compatible-mode/v1'}
+        with patch('leaflet_guidance.urlopen', return_value=io.BytesIO(json.dumps(reply, ensure_ascii=False).encode())):
+            result = extract_leaflet_guidance(source, cfg, endpoint)
+        self.assertNotIn('2', [option['dose'] for option in result['doseOptions']])
+        self.assertEqual(result['doseOptions'][1]['dose'], '1')
+        self.assertEqual(result['mode'], 'asNeeded')
 
 
 if __name__ == '__main__':

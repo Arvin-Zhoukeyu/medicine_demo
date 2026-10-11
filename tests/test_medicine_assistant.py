@@ -37,6 +37,14 @@ class AssistantTests(unittest.TestCase):
         self.assertNotIn('已停药', result['answer'])
         self.assertEqual(result['sources'][0]['title'], '当前浏览器中的已启用计划')
 
+    def test_as_needed_plan_has_no_fixed_dose_time(self):
+        plans = [{'active': True, 'mode': 'asNeeded', 'startDate': TODAY, 'endDate': TODAY, 'medicines': [
+            {'name': '测试颗粒', 'dose': '1', 'unit': '包', 'times': []},
+        ]}]
+        result = self.ask('今天几点吃药？', plans)
+        self.assertIn('没有固定服药时刻', result['answer'])
+        self.assertNotIn('09:00', result['answer'])
+
     def test_emergency_does_not_call_model(self):
         with patch('medicine_assistant.urlopen') as send:
             result = self.ask('吃了阿莫西林后呼吸困难怎么办？')

@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from medicine_assistant import answer_question
+from leaflet_guidance import extract_leaflet_guidance
 
 ROOT = Path(__file__).resolve().parent
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
@@ -210,6 +211,11 @@ class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(ROOT / 'web'), **kwargs)
 
+    def end_headers(self):
+        if not self.path.startswith('/api/'):
+            self.send_header('Cache-Control', 'no-store')
+        super().end_headers()
+
     def send_json(self, status, value):
         data = json.dumps(value, ensure_ascii=False).encode('utf-8')
         self.send_response(status)
@@ -231,7 +237,7 @@ class Handler(SimpleHTTPRequestHandler):
         super().do_GET()
 
     def do_POST(self):
-        if self.path not in ('/api/parse', '/api/parse-image', '/api/assistant'):
+        if self.path not in ('/api/parse', '/api/parse-image', '/api/parse-leaflet', '/api/assistant'):
             self.send_json(404, {'error': '未找到'})
             return
         try:
@@ -239,7 +245,7 @@ class Handler(SimpleHTTPRequestHandler):
         except ValueError:
             self.send_json(400, {'error': '请求长度无效'})
             return
-        limit = MAX_IMAGE_REQUEST_BYTES if self.path == '/api/parse-image' else (32000 if self.path == '/api/assistant' else 24000)
+        limit = MAX_IMAGE_REQUEST_BYTES if self.path == '/api/parse-image' else (50000 if self.path in ('/api/assistant', '/api/parse-leaflet') else 24000)
         if size < 1 or size > limit:
             self.send_json(400, {'error': '输入长度不合适'})
             return
@@ -249,6 +255,9 @@ class Handler(SimpleHTTPRequestHandler):
                 raise ValueError('请求格式无效')
             if self.path == '/api/parse-image':
                 self.send_json(200, parse_image(data.get('image')))
+                return
+            if self.path == '/api/parse-leaflet':
+                self.send_json(200, extract_leaflet_guidance(data.get('text'), load_env(), endpoint))
                 return
             if self.path == '/api/assistant':
                 self.send_json(200, answer_question(

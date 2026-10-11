@@ -1,4 +1,4 @@
-import { localDate, validPlan, createPlan, addEvent, archiveIfEnded, statusLabel, occupiedSlots, conflictingSlots } from './core.js';
+import { localDate, validPlan, createPlan, addEvent, archiveIfEnded, statusLabel, occupiedSlots, conflictingSlots, asNeededUseWarnings, addAsNeededUse } from './core.js?v=20261011-leaflet-autofill-2';
 
 const $ = selector => document.querySelector(selector);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]);
@@ -18,7 +18,7 @@ let assistantBusy = false;
 let assistantDocument = null;
 let assistantMessages = [{ role: 'assistant', content: '你好，可以问我当前计划的时间，也可以问药品资料。你还可以上传药品说明书照片，核对识别文字后就其中的内容提问。回答会标明依据；没有可核对的内容时我会说明。个人用药调整请向医生或药师确认。', sources: [] }];
 
-function newDraft() { return { title: '', startDate: today(), endDate: today(), sourceText: '', imageData: '', imageName: '', photoText: '', photoKind: '', medicines: [emptyMed()] }; }
+function newDraft() { return { title: '', startDate: today(), endDate: today(), sourceText: '', imageData: '', imageName: '', photoText: '', photoKind: '', leafletError: '', mode: 'fixed', leafletGuidance: null, selectedDoseOption: '', purpose: '', medicines: [emptyMed()] }; }
 function loadPlans() {
   try {
     const value = JSON.parse(localStorage.getItem('medicine-box-plans-v1') || '[]');
@@ -79,6 +79,12 @@ function taskCard(plan, task) {
   const pillClass = task.status === 'uncertain' ? 'warn' : task.status === 'confirmed' ? '' : 'neutral';
   return `<article class="card task-card"><div class="task-head"><div><div class="task-time">${esc(formatTime(task.scheduledAt))}</div><div class="task-name">${esc(med.name)}</div></div><span class="pill ${pillClass}">${statusLabel(task.status)}</span></div><div class="task-meta">${esc(plan.title)} · ${esc(med.dose)} ${esc(med.unit)} · ${esc(med.slot)} 号药格<br>${opens ? `已记录 ${opens} 次开盒，开盒不代表已经服用` : '尚无开盒记录'}${task.remindAt ? `<br>下次提醒：${esc(new Date(task.remindAt).toLocaleString('zh-CN'))}` : ''}</div><div class="button-row"><button class="secondary" data-action="task" data-plan="${esc(plan.id)}" data-task="${esc(task.id)}">查看任务</button>${task.status !== 'confirmed' && task.status !== 'cancelled' ? `<button class="primary" data-action="confirm" data-plan="${esc(plan.id)}" data-task="${esc(task.id)}">我已服用</button>` : ''}</div></article>`;
 }
+function asNeededCard(plan) {
+  const med = plan.medicines[0];
+  const guidance = plan.leafletGuidance || {};
+  const parts = [guidance.interval ? `至少间隔 ${guidance.interval.minHours} 小时` : '', guidance.maxPer24h ? `24 小时最多 ${guidance.maxPer24h.count} 次` : ''].filter(Boolean);
+  return `<article class="card task-card"><div class="task-head"><div><div class="task-name">${esc(med.name)}</div><div class="row-sub">按需使用 · ${esc(plan.title)}</div></div><span class="pill neutral">不设定时提醒</span></div><div class="task-meta">已选说明书人群：${esc(guidance.doseOptions?.[plan.selectedDoseOption]?.group || '')}<br>单次用量：${esc(med.dose)} ${esc(med.unit)} · ${esc(med.slot)} 号药格${parts.length ? `<br>${esc(parts.join('；'))}` : ''}<br>症状出现时按已核对的说明书或专业人员指导使用。</div><div class="button-row"><button class="secondary" data-action="plan" data-plan="${esc(plan.id)}">查看依据</button><button class="primary" data-action="record-prn" data-plan="${esc(plan.id)}">记录已服用</button></div></article>`;
+}
 function home() {
   const active = activePlans();
   const d = new Date();
@@ -88,12 +94,14 @@ function home() {
   const headline = active.length === 1 ? active[0].title : `${active.length} 个进行中的计划`;
   const subline = active.length === 1 ? `${formatDay(active[0].startDate)} — ${formatDay(active[0].endDate)}` : `今天共有 ${todayTasks.length} 项任务`;
   html += `<div class="hero"><div class="eyebrow">进行中的计划</div><h2>${esc(headline)}</h2><p>${esc(subline)}</p><button class="primary" data-action="create">＋ 新建计划</button></div>${stats(active)}<div class="section-title">今日任务 <span class="muted small">${todayTasks.length} 项</span></div>`;
-  html += todayTasks.length ? todayTasks.map(({ plan, task }) => taskCard(plan, task)).join('') : `<div class="card empty"><div class="empty-icon">✓</div><h2>今天没有安排</h2><p>可到“计划”查看完整时间表。</p></div>`;
+  html += todayTasks.length ? todayTasks.map(({ plan, task }) => taskCard(plan, task)).join('') : `<div class="card empty"><div class="empty-icon">✓</div><h2>今天没有定时任务</h2><p>可到“计划”查看完整安排。</p></div>`;
+  const asNeeded = active.filter(plan => plan.mode === 'asNeeded' && plan.startDate <= today() && plan.endDate >= today());
+  if (asNeeded.length) html += `<div class="section-title">按需计划</div>${asNeeded.map(asNeededCard).join('')}`;
   return html;
 }
 function planCard(plan) {
   const status = plan.active ? '进行中' : '已归档';
-  return `<article class="card"><div class="row"><div><div class="row-title">${esc(plan.title)}</div><div class="row-sub">${formatDay(plan.startDate)} — ${formatDay(plan.endDate)} · ${plan.medicines.length} 种药品</div></div><span class="pill ${plan.active ? '' : 'neutral'}">${status}</span></div><hr class="divider"><div class="row plan-card-actions-row"><span class="muted small">${plan.tasks.length} 项任务 · ${plan.tasks.filter(t => t.status === 'confirmed').length} 项已确认</span><div class="plan-actions"><button class="link-button stop" data-action="delete-plan" data-plan="${esc(plan.id)}" aria-label="删除计划：${esc(plan.title)}">删除</button><button class="link-button" data-action="plan" data-plan="${esc(plan.id)}">查看详情 ›</button></div></div></article>`;
+  return `<article class="card"><div class="row"><div><div class="row-title">${esc(plan.title)}</div><div class="row-sub">${formatDay(plan.startDate)} — ${formatDay(plan.endDate)} · ${plan.medicines.length} 种药品${plan.mode === 'asNeeded' ? ' · 按需' : ''}</div></div><span class="pill ${plan.active ? '' : 'neutral'}">${status}</span></div><hr class="divider"><div class="row plan-card-actions-row"><span class="muted small">${plan.mode === 'asNeeded' ? `已记录 ${plan.prnEvents?.length || 0} 次使用` : `${plan.tasks.length} 项任务 · ${plan.tasks.filter(t => t.status === 'confirmed').length} 项已确认`}</span><div class="plan-actions"><button class="link-button stop" data-action="delete-plan" data-plan="${esc(plan.id)}" aria-label="删除计划：${esc(plan.title)}">删除</button><button class="link-button" data-action="plan" data-plan="${esc(plan.id)}">查看详情 ›</button></div></div></article>`;
 }
 function plansPage() {
   let html = pageIntro('我的安排', '用药计划', '计划到期后自动归档，记录仍可查看。');
@@ -106,9 +114,9 @@ function eventLabel(event) {
 }
 function recordsPage() {
   let html = pageIntro('可查的时间线', '记录', '开盒与服用确认分别记录，方便回看。');
-  const entries = plans.flatMap(plan => plan.tasks.flatMap(task => task.events.map(event => ({ plan, task, event })))).sort((a, b) => b.event.at.localeCompare(a.event.at));
+  const entries = plans.flatMap(plan => [...plan.tasks.flatMap(task => task.events.map(event => ({ plan, task, event }))), ...(plan.prnEvents || []).map(event => ({ plan, task: null, event }))]).sort((a, b) => b.event.at.localeCompare(a.event.at));
   if (!entries.length) return html + empty('◷', '还没有记录', '完成任务操作后，记录会显示在这里。');
-  html += `<div class="card"><ul class="timeline">${entries.slice(0, 80).map(({ plan, task, event }) => `<li><b>${esc(eventLabel(event))} · ${esc(medicine(plan, task).name)}</b><p>${esc(new Date(event.at).toLocaleString('zh-CN'))} · ${event.source === 'device' ? '药盒' : '手动记录'}</p></li>`).join('')}</ul></div>`;
+  html += `<div class="card"><ul class="timeline">${entries.slice(0, 80).map(({ plan, task, event }) => `<li><b>${esc(task ? eventLabel(event) : '记录按需服用')} · ${esc(task ? medicine(plan, task).name : plan.medicines[0].name)}</b><p>${esc(new Date(event.at).toLocaleString('zh-CN'))} · ${event.source === 'device' ? '药盒' : '手动记录'}</p></li>`).join('')}</ul></div>`;
   return html;
 }
 function devicePage() {
@@ -146,7 +154,7 @@ async function askAssistant(question) {
   assistantMessages.push({ role: 'user', content: question });
   assistantBusy = true; renderAssistant();
   try {
-    const snapshot = activePlans().map(plan => ({ active: plan.active, startDate: plan.startDate, endDate: plan.endDate, medicines: plan.medicines.map(med => ({ name: med.name, dose: med.dose, unit: med.unit, times: med.times })) }));
+    const snapshot = activePlans().map(plan => ({ active: plan.active, mode: plan.mode, startDate: plan.startDate, endDate: plan.endDate, medicines: plan.medicines.map(med => ({ name: med.name, dose: med.dose, unit: med.unit, times: med.times })) }));
     const document = assistantDocument?.confirmed ? { text: assistantDocument.text, confirmed: true } : undefined;
     const response = await fetch('/api/assistant', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question, plans: snapshot, today: today(), history, document }) });
     const body = await response.json();
@@ -180,6 +188,9 @@ function shell(title, body) {
   $('#sheet-root').innerHTML = `<div class="sheet-overlay"><section class="sheet" role="dialog" aria-modal="true" aria-label="${esc(title)}"><div class="sheet-handle"></div><div class="sheet-head"><h2>${esc(title)}</h2><button data-action="close" aria-label="关闭">×</button></div>${body}</section></div>`;
 }
 function medicationEditor(med, index) {
+  if (draft.mode === 'asNeeded') {
+    return `<div class="med-editor"><h3>说明书建议草稿</h3>${med.sources ? `<div class="source-line">原文：${esc(med.sources)}</div>` : ''}<div class="kv"><span>药品</span><span>${esc(med.name || '待选择人群')}</span></div><div class="kv"><span>单次用量</span><span>${esc(med.dose || '请选择适用人群')} ${esc(med.unit)}</span></div><div class="notice">按需计划不会生成固定服药时刻或到点催服提醒。只有实际使用后，才手动记录一次。</div><label class="form-label">对应药格</label><select class="select" data-med="${index}" data-field="slot"><option value="0">请选择药格</option>${[1,2,3].map(n => `<option value="${n}" ${Number(med.slot) === n ? 'selected' : ''}>${n} 号药格</option>`).join('')}</select></div>`;
+  }
   const customUnit = med.unitCustom || (med.unit && !UNIT_OPTIONS.includes(med.unit));
   const unitChoice = customUnit ? 'other' : med.unit;
   const timeRows = (med.times.length ? med.times : ['']).map((time, timeIndex) => `<div class="time-row"><input class="input" type="time" step="60" aria-label="第 ${timeIndex + 1} 次执行时间" data-med="${index}" data-time-index="${timeIndex}" value="${esc(time)}">${timeIndex > 0 ? `<button class="time-remove" type="button" data-action="remove-time" data-med="${index}" data-time-index="${timeIndex}" aria-label="移除第 ${timeIndex + 1} 次时间">移除</button>` : ''}</div>`).join('');
@@ -188,22 +199,28 @@ function medicationEditor(med, index) {
 function photoReview(expanded = false) {
   if (!draft.photoText) return '';
   const kind = draft.photoKind === 'leaflet' ? '药品说明书' : draft.photoKind === 'prescription' ? '处方或用药安排' : '其他图片';
-  return `<div class="notice">已识别为${kind}。请对照原照片核对文字；看不清或缺失的字段需要依据已确认的安排填写。${draft.photoKind === 'leaflet' ? '说明书的通用用法不能直接作为个人计划，请依据医生或药师确认的安排手动填写。' : ''}</div><details class="photo-text" ${expanded ? 'open' : ''}><summary>查看原照片与识别文字</summary>${draft.imageData ? `<img class="photo-preview" src="${draft.imageData}" alt="原照片">` : ''}<pre>${esc(draft.photoText)}</pre></details>`;
+  return `<div class="notice">已识别为${kind}。请对照原照片核对文字；看不清或缺失的字段需要依据原件补充。${draft.photoKind === 'leaflet' ? '说明书可提供分人群用量与使用限制草稿；请先确认适用人群和用途，不会自动安排固定服药时刻。' : ''}</div><details class="photo-text" ${expanded ? 'open' : ''}><summary>查看原照片与识别文字</summary>${draft.imageData ? `<img class="photo-preview" src="${draft.imageData}" alt="原照片">` : ''}<pre>${esc(draft.photoText)}</pre></details>`;
+}
+function leafletGuidanceView() {
+  const guidance = draft.leafletGuidance;
+  if (!guidance) return '';
+  const lines = [guidance.interval?.evidence, guidance.maxPer24h?.evidence, guidance.durationLimits?.pain?.evidence, guidance.durationLimits?.fever?.evidence].filter(Boolean);
+  return `<div class="card"><div class="row-title">说明书建议 · ${esc(guidance.name)}</div><p class="row-sub">以下内容只来自已识别的说明书原文。请先对照照片核对年龄人群、禁忌、正在使用的其他药品和医嘱。</p><label class="form-label">适用人群（由你选择）</label><select class="select" data-draft="selectedDoseOption"><option value="">请选择与本人相符的人群</option>${guidance.doseOptions.map((option, index) => `<option value="${index}" ${String(draft.selectedDoseOption) === String(index) ? 'selected' : ''}>${esc(option.group)} · 每次 ${esc(option.dose)} ${esc(option.unit)}</option>`).join('')}</select><label class="form-label">本次用途（由你选择）</label><select class="select" data-draft="purpose"><option value="">请选择</option><option value="pain" ${draft.purpose === 'pain' ? 'selected' : ''}>缓解疼痛</option><option value="fever" ${draft.purpose === 'fever' ? 'selected' : ''}>退热</option></select>${guidance.conditionalEvidence ? `<div class="source-line">按需条件原文：${esc(guidance.conditionalEvidence)}</div>` : ''}${lines.map(line => `<div class="source-line">${esc(line)}</div>`).join('')}<div class="field-note">间隔、24 小时次数和使用天数是上限或条件，不代表应当按上限服药。若有个人医嘱或不确定是否适用，请先咨询医生或药师。</div></div>`;
 }
 function createSheet() {
   const steps = `<div class="steps">${[1,2,3].map(n => `<span class="${n <= step ? 'on' : ''}"></span>`).join('')}</div>`;
   if (step === 1) {
-    shell('建立计划', `${steps}<p class="lead">根据已有安排填写日期和药品信息，确认后生成每日任务。</p><label class="form-label">计划名称</label><input class="input" data-draft="title" value="${esc(draft.title)}" placeholder="例如 近期用药"><div class="form-grid"><div><label class="form-label">开始日期</label><input class="input" type="date" data-draft="startDate" value="${esc(draft.startDate)}"></div><div><label class="form-label">结束日期</label><input class="input" type="date" data-draft="endDate" value="${esc(draft.endDate)}"></div></div><label class="form-label">已有用药安排</label><textarea class="textarea" data-draft="sourceText" placeholder="可粘贴已有安排，随后核对提取结果">${esc(draft.sourceText)}</textarea><div class="field-note">自动整理的内容需要逐项核对；没有配置时可直接手动填写。</div><div class="button-row" style="margin-top:18px"><button class="secondary" data-action="manual">手动填写</button><button class="primary" data-action="parse" ${busy ? 'disabled' : ''}>${busy ? '整理中…' : '整理安排'}</button></div><div class="section-title">从照片整理</div><p class="row-sub">支持处方或药品说明书照片。照片文件只用于本次识别，不保存在计划中。</p><div class="photo-choices"><label class="secondary photo-picker" for="camera-photo">拍照<input id="camera-photo" type="file" accept="image/jpeg,image/png,image/webp" capture="environment" data-photo-input hidden></label><label class="secondary photo-picker" for="upload-photo">选择照片<input id="upload-photo" type="file" accept="image/jpeg,image/png,image/webp" data-photo-input hidden></label></div>${draft.imageData ? `<img class="photo-preview" src="${draft.imageData}" alt="待识别照片"><div class="field-note">${esc(draft.imageName)} · 请确认照片清晰且文字完整</div><button class="primary full" data-action="parse-image" ${busy ? 'disabled' : ''}>${busy ? '识别中…' : '识别照片'}</button>` : ''}${photoReview()}`);
+    shell('建立计划', `${steps}<p class="lead">上传说明书后自动填写计划草稿；缺少的信息由你补充并确认。</p><label class="form-label">计划名称</label><input class="input" data-draft="title" value="${esc(draft.title)}" placeholder="例如 近期用药"><div class="form-grid"><div><label class="form-label">开始日期</label><input class="input" type="date" data-draft="startDate" value="${esc(draft.startDate)}"></div><div><label class="form-label">结束日期</label><input class="input" type="date" data-draft="endDate" value="${esc(draft.endDate)}"></div></div><label class="form-label">已有用药安排</label><textarea class="textarea" data-draft="sourceText" placeholder="可粘贴已有安排，随后核对提取结果">${esc(draft.sourceText)}</textarea><div class="field-note">自动整理的内容需要逐项核对；没有配置时可直接手动填写。</div><div class="button-row" style="margin-top:18px"><button class="secondary" data-action="manual">手动填写</button><button class="primary" data-action="parse" ${busy ? 'disabled' : ''}>${busy ? '整理中…' : '整理安排'}</button></div><div class="section-title">从照片整理</div><p class="row-sub">支持处方或药品说明书照片。说明书识别后会自动填写草稿；照片文件不保存在计划中。</p><div class="photo-choices"><label class="secondary photo-picker" for="camera-photo">拍照<input id="camera-photo" type="file" accept="image/jpeg,image/png,image/webp" capture="environment" data-photo-input hidden></label><label class="secondary photo-picker" for="upload-photo">选择照片<input id="upload-photo" type="file" accept="image/jpeg,image/png,image/webp" data-photo-input hidden></label></div>${draft.imageData ? `<img class="photo-preview" src="${draft.imageData}" alt="待识别照片"><div class="field-note">${esc(draft.imageName)} · 请确认照片清晰且文字完整</div><button class="primary full" data-action="parse-image" ${busy ? 'disabled' : ''}>${busy ? '识别并填写中…' : '识别并填写草稿'}</button>` : ''}${photoReview()}${draft.leafletError ? `<div class="notice">自动填写失败：${esc(draft.leafletError)}。请核对识别文字后重新提取。</div>` : ""}${draft.photoKind === 'leaflet' ? `<label class="form-label">核对并修正识别文字</label><textarea class="textarea" data-draft="photoText" maxlength="12000">${esc(draft.photoText)}</textarea><button class="primary full" data-action="extract-leaflet" ${busy ? 'disabled' : ''}>${busy ? '提取中…' : '提取说明书建议'}</button>` : ''}`);
     return;
   }
   if (step === 2) {
     const used = [...occupiedSlots(draft, activePlans())].sort();
-    shell('核对药品', `${steps}<p class="lead">逐项核对药品、用量、时间和药格，缺少的内容请依据原安排补充。</p>${photoReview()}${draft.photoText ? `<div class="form-grid"><div><label class="form-label">开始日期</label><input class="input" type="date" data-draft="startDate" value="${esc(draft.startDate)}"></div><div><label class="form-label">结束日期</label><input class="input" type="date" data-draft="endDate" value="${esc(draft.endDate)}"></div></div>` : ''}${used.length ? `<div class="notice">当前时段已有计划占用 ${used.join('、')} 号药格，请为新计划选择其他药格。</div>` : ''}${draft.medicines.map(medicationEditor).join('')}${draft.medicines.length < 3 ? `<button class="ghost full" data-action="add-med">＋ 添加药品</button>` : ''}<div class="button-row" style="margin-top:18px"><button class="secondary" data-action="step-back">上一步</button><button class="primary" data-action="review">查看计划</button></div>`);
+    shell('核对药品', `${steps}<p class="lead">${draft.leafletGuidance ? '已按说明书填写药品建议，日期暂填今天；请选择适用人群和用途，再核对计划。' : '逐项核对药品、用量、时间和药格，缺少的内容请依据原安排补充。'}</p>${photoReview()}${draft.leafletError ? `<div class="notice">自动填写失败：${esc(draft.leafletError)}。请核对识别文字后重新提取。</div>` : ""}${draft.leafletGuidance ? leafletGuidanceView() : ''}${draft.photoText ? `<div class="form-grid"><div><label class="form-label">开始日期</label><input class="input" type="date" data-draft="startDate" value="${esc(draft.startDate)}"></div><div><label class="form-label">结束日期</label><input class="input" type="date" data-draft="endDate" value="${esc(draft.endDate)}"></div></div>` : ''}${used.length ? `<div class="notice">当前时段已有计划占用 ${used.join('、')} 号药格，请为新计划选择其他药格。</div>` : ''}${draft.medicines.map(medicationEditor).join('')}${!draft.leafletGuidance && draft.medicines.length < 3 ? `<button class="ghost full" data-action="add-med">＋ 添加药品</button>` : ''}<div class="button-row" style="margin-top:18px"><button class="secondary" data-action="step-back">上一步</button><button class="primary" data-action="review">查看计划</button></div>`);
     return;
   }
   const errors = validPlan(draft);
   const count = errors.length ? 0 : createPlan(draft, 'preview').tasks.length;
-  shell('确认计划', `${steps}<p class="lead">已生成计划草稿。请对照原照片或原安排核对，确认后计划才会生效。</p>${draft.photoText ? photoReview(true) : ''}<div class="card"><div class="row-title">${esc(draft.title || '短期用药计划')}</div><div class="row-sub">${formatDay(draft.startDate)} — ${formatDay(draft.endDate)} · 共 ${count} 项任务</div><hr class="divider">${draft.medicines.map(m => `<div class="kv"><span>${esc(m.name)}</span><span>${esc(m.dose)} ${esc(m.unit)} · ${esc(m.times.join('、'))} · ${m.slot} 号格</span></div>`).join('')}</div><div class="notice">开盒只会留下事件记录。只有你主动确认，任务才会显示“已确认”。</div><label class="row small"><input type="checkbox" id="review-checked"> <span>我已核对药品、单次用量、日期、时间和药格</span></label><div class="button-row" style="margin-top:19px"><button class="secondary" data-action="step-back">返回修改</button><button class="primary" data-action="activate">确认并创建计划</button></div>`);
+  shell('确认计划', `${steps}<p class="lead">已生成计划草稿。请对照原照片或原安排核对，确认后计划才会生效。</p>${draft.photoText ? photoReview(true) : ''}<div class="card"><div class="row-title">${esc(draft.title || '短期用药计划')}</div><div class="row-sub">${formatDay(draft.startDate)} — ${formatDay(draft.endDate)} · ${draft.mode === 'asNeeded' ? '按需记录，不生成定时任务' : `共 ${count} 项任务`}</div><hr class="divider">${draft.medicines.map(m => `<div class="kv"><span>${esc(m.name)}</span><span>${esc(m.dose)} ${esc(m.unit)} · ${draft.mode === 'asNeeded' ? '按需' : esc(m.times.join('、'))} · ${m.slot} 号格</span></div>`).join('')}${draft.mode === 'asNeeded' ? `<div class="source-line">已选人群：${esc(draft.leafletGuidance.doseOptions[Number(draft.selectedDoseOption)].group)}；用途：${draft.purpose === 'pain' ? '缓解疼痛' : '退热'}</div>` : ''}</div><div class="notice">${draft.mode === 'asNeeded' ? '说明书的间隔、次数和天数是限制条件，不是定时服药建议。请确认所选人群与用途适用于本人；如有个人医嘱，以专业人员确认的安排为准。' : '开盒只会留下事件记录。只有你主动确认，任务才会显示“已确认”。'}</div><label class="row small"><input type="checkbox" id="review-checked"> <span>${draft.mode === 'asNeeded' ? '我已对照说明书核对适用人群、用量、用途、日期、药格及注意事项' : '我已核对药品、单次用量、日期、时间和药格'}</span></label><div class="button-row" style="margin-top:19px"><button class="secondary" data-action="step-back">返回修改</button><button class="primary" data-action="activate">确认并创建计划</button></div>`);
 }
 function taskSheet() {
   const { plan, task } = byId(selectedTask.planId, selectedTask.taskId);
@@ -221,6 +238,13 @@ function taskSheet() {
 function planSheet() {
   const plan = plans.find(p => p.id === selectedTask?.planId);
   if (!plan) return closeSheet();
+  if (plan.mode === 'asNeeded') {
+    const med = plan.medicines[0];
+    const guidance = plan.leafletGuidance || {};
+    const excerpts = [guidance.doseOptions?.[plan.selectedDoseOption]?.evidence, guidance.interval?.evidence, guidance.maxPer24h?.evidence, guidance.durationLimits?.[plan.purpose]?.evidence].filter(Boolean);
+    shell('按需计划详情', `<div class="card"><div class="row-title">${esc(plan.title)}</div><div class="row-sub">${formatDay(plan.startDate)} — ${formatDay(plan.endDate)} · ${esc(med.name)} · ${esc(med.dose)} ${esc(med.unit)}</div><div class="row-sub">已选人群：${esc(guidance.doseOptions?.[plan.selectedDoseOption]?.group || '')} · 用途：${plan.purpose === 'pain' ? '缓解疼痛' : '退热'} · ${esc(med.slot)} 号药格</div></div><div class="section-title">说明书依据</div><div class="card">${excerpts.map(line => `<div class="source-line">${esc(line)}</div>`).join('')}<div class="field-note">请始终对照原说明书，必要时咨询医生或药师。</div></div><div class="section-title">已记录的使用</div><div class="card">${plan.prnEvents?.length ? `<ul class="timeline">${plan.prnEvents.slice().reverse().map(event => `<li><b>已服用</b><p>${esc(new Date(event.at).toLocaleString('zh-CN'))} · 手动记录</p></li>`).join('')}</ul>` : '<div class="row-sub">尚无使用记录</div>'}</div>${plan.active && plan.startDate <= today() && plan.endDate >= today() ? `<button class="primary full" data-action="record-prn" data-plan="${esc(plan.id)}">记录已服用</button>` : ''}${plan.active ? `<button class="danger full delete-plan-button" data-action="stop" data-plan="${esc(plan.id)}">停止此计划</button>` : ''}<button class="danger full delete-plan-button" data-action="delete-plan" data-plan="${esc(plan.id)}">删除计划及其记录</button>`);
+    return;
+  }
   const medRows = plan.medicines.map(m => `<div class="kv"><span>${esc(m.name)}</span><span>${esc(m.times.join('、'))} · ${esc(m.slot)} 号格</span></div>`).join('');
   const taskRows = plan.tasks.slice(0, 80).map(t => `<div class="row" style="padding:10px 0;border-top:1px solid #edf0eb"><div><div class="row-title small">${formatDay(t.scheduledAt.slice(0,10))} ${formatTime(t.scheduledAt)} · ${esc(medicine(plan,t).name)}</div><div class="row-sub">${statusLabel(t.status)}</div></div><button class="link-button" data-action="task" data-plan="${esc(plan.id)}" data-task="${esc(t.id)}">查看 ›</button></div>`).join('');
   shell('计划详情', `<div class="card"><div class="row-title">${esc(plan.title)}</div><div class="row-sub">${formatDay(plan.startDate)} — ${formatDay(plan.endDate)}</div><hr class="divider">${medRows}</div><div class="section-title">任务时间表</div><div class="card">${taskRows}${plan.tasks.length > 80 ? `<p class="row-sub">仅显示前 80 项</p>` : ''}</div>${plan.active ? `<button class="danger full" data-action="stop" data-plan="${esc(plan.id)}">停止此计划的提醒</button>` : ''}<button class="danger full delete-plan-button" data-action="delete-plan" data-plan="${esc(plan.id)}">删除计划及其记录</button>`);
@@ -252,6 +276,10 @@ async function parseSource() {
     const response = await fetch('/api/parse', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: draft.sourceText }) });
     const body = await response.json();
     if (!response.ok) throw new Error(body.error || '暂时无法整理');
+    draft.mode = 'fixed';
+    draft.leafletGuidance = null;
+    draft.selectedDoseOption = '';
+    draft.purpose = '';
     draft.medicines = body.medications.map((m, i) => ({ name:m.name, dose:m.dose, unit:m.unit, unitCustom: Boolean(m.unit && !UNIT_OPTIONS.includes(m.unit)), times:m.times, slot:i+1, sources:m.sources }));
     const starts = body.medications.map(m => m.startDate).filter(Boolean);
     const ends = body.medications.map(m => m.endDate).filter(Boolean);
@@ -264,6 +292,7 @@ async function parseSource() {
 }
 function selectPhoto(file) {
   if (!file) return;
+  if (busy) return toast('当前照片处理中，请稍后重新选择');
   if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) return toast('请选择 JPG、PNG 或 WebP 照片');
   if (file.size > 5 * 1024 * 1024) return toast('照片不能超过 5 MB');
   const currentDraft = draft;
@@ -274,7 +303,13 @@ function selectPhoto(file) {
     draft.imageName = file.name;
     draft.photoText = '';
     draft.photoKind = '';
+    draft.leafletError = '';
+    draft.mode = 'fixed';
+    draft.leafletGuidance = null;
+    draft.selectedDoseOption = '';
+    draft.purpose = '';
     renderSheet();
+    parseImage();
   };
   reader.onerror = () => toast('无法读取照片，请重新选择');
   reader.readAsDataURL(file);
@@ -290,6 +325,7 @@ async function parseImage() {
     if (draft !== currentDraft || sheet !== 'create') return;
     draft.photoText = body.text;
     draft.photoKind = body.documentType;
+    draft.leafletError = '';
     draft.startDate = '';
     draft.endDate = '';
     if (body.documentType === 'prescription' && body.medications?.length) {
@@ -302,12 +338,68 @@ async function parseImage() {
       const ready = !validPlan(draft).length && !conflictingSlots(draft, activePlans()).length;
       step = ready ? 3 : 2;
       toast(ready ? '已生成计划草稿，请对照照片确认' : '识别完成，请补充或核对缺少的信息');
+    } else if (body.documentType === 'leaflet') {
+      draft.sourceText = '';
+      draft.mode = 'fixed';
+      draft.leafletGuidance = null;
+      draft.selectedDoseOption = '';
+      draft.purpose = '';
+      draft.medicines = [emptyMed()];
+      step = 1;
+      toast('说明书已识别，正在自动填写计划草稿');
+      renderSheet();
+      try {
+        const guidance = await requestLeafletGuidance(body.text);
+        if (draft !== currentDraft || sheet !== 'create') return;
+        if (draft.photoText !== body.text) return toast('识别文字已修改，请重新提取说明书建议');
+        applyLeafletGuidance(guidance);
+        toast('已填写说明书计划草稿，请补充并核对信息');
+      } catch (error) {
+        if (draft === currentDraft) {
+          draft.leafletError = error.message;
+          toast('已识别说明书，但自动填写失败；请查看原因并重试');
+        }
+      }
     } else {
       draft.sourceText = '';
       draft.medicines = [emptyMed()];
-      toast(body.documentType === 'leaflet' ? '说明书已识别，请按已确认安排手动填写' : '已识别文字，请核对后手动填写');
+      toast('已识别文字，请核对后手动填写');
     }
   } catch (error) { if (draft === currentDraft) toast(error.message); }
+  finally { busy = false; if (draft === currentDraft && sheet === 'create') renderSheet(); }
+}
+async function requestLeafletGuidance(text) {
+  const response = await fetch('/api/parse-leaflet', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) });
+  const body = await response.json();
+  if (!response.ok) throw new Error(body.error || '暂时无法提取说明书建议');
+  return body;
+}
+function applyLeafletGuidance(guidance) {
+  draft.leafletError = '';
+  draft.leafletGuidance = guidance;
+  draft.mode = guidance.mode;
+  draft.selectedDoseOption = '';
+  draft.purpose = '';
+  draft.startDate = today();
+  draft.endDate = today();
+  const usedSlots = occupiedSlots(draft, activePlans());
+  const availableSlot = [1, 2, 3].find(slot => !usedSlots.has(slot)) || 0;
+  draft.medicines = [{ ...emptyMed(), name: guidance.name, slot: availableSlot }];
+  if (!draft.title) draft.title = `${guidance.name}短期计划`;
+  step = 2;
+}
+async function extractLeaflet() {
+  if (busy || draft.photoKind !== 'leaflet' || !draft.photoText.trim()) return;
+  const currentDraft = draft;
+  busy = true; renderSheet();
+  try {
+    const source = currentDraft.photoText;
+    const body = await requestLeafletGuidance(source);
+    if (draft !== currentDraft || sheet !== 'create') return;
+    if (draft.photoText !== source) return toast('识别文字已修改，请重新提取说明书建议');
+    applyLeafletGuidance(body);
+    toast(body.mode === 'asNeeded' ? '已生成按需建议草稿，请选择人群和用途' : '已提取说明书用量，请补充个人执行时间');
+  } catch (error) { if (draft === currentDraft) { draft.leafletError = error.message; toast('提取失败，请查看原因并重试'); } }
   finally { busy = false; if (draft === currentDraft && sheet === 'create') renderSheet(); }
 }
 
@@ -320,7 +412,10 @@ document.addEventListener('input', event => {
     if (confirmButton) { confirmButton.disabled = false; confirmButton.textContent = '确认文字作为提问依据'; }
     return;
   }
-  if (el.dataset.draft) draft[el.dataset.draft] = el.value;
+  if (el.dataset.draft) {
+    draft[el.dataset.draft] = el.value;
+    if (el.dataset.draft === 'photoText') draft.leafletGuidance = null;
+  }
   if (el.dataset.med !== undefined) {
     const med = draft.medicines[Number(el.dataset.med)];
     if (!med) return;
@@ -337,6 +432,16 @@ document.addEventListener('change', event => {
   if (el.id === 'assistant-photo') return selectAssistantPhoto(el.files?.[0]);
   if (el.matches('[data-photo-input]')) return selectPhoto(el.files?.[0]);
   if (el.dataset.draft) draft[el.dataset.draft] = el.value;
+  if (el.dataset.draft === 'selectedDoseOption' && draft.leafletGuidance) {
+    const option = el.value === '' ? null : draft.leafletGuidance.doseOptions[Number(el.value)];
+    const med = draft.medicines[0];
+    med.name = draft.leafletGuidance.name;
+    med.dose = option?.dose || '';
+    med.unit = option?.unit || '';
+    med.sources = option?.evidence || '';
+    return renderSheet();
+  }
+  if (el.dataset.draft === 'purpose' && draft.leafletGuidance) return renderSheet();
   if (el.dataset.med !== undefined && el.dataset.timeIndex !== undefined) {
     draft.medicines[Number(el.dataset.med)].times[Number(el.dataset.timeIndex)] = el.value;
   }
@@ -368,9 +473,10 @@ document.addEventListener('click', event => {
   }
   if (action === 'create') return openCreate();
   if (action === 'close') return closeSheet();
-  if (action === 'manual') { step=2; return renderSheet(); }
+  if (action === 'manual') { draft.mode='fixed'; draft.leafletGuidance=null; draft.selectedDoseOption=''; draft.purpose=''; step=2; return renderSheet(); }
   if (action === 'parse') return parseSource();
   if (action === 'parse-image') return parseImage();
+  if (action === 'extract-leaflet') return extractLeaflet();
   if (action === 'add-med') { draft.medicines.push(emptyMed()); return renderSheet(); }
   if (action === 'remove-med') { draft.medicines.splice(Number(button.dataset.index), 1); return renderSheet(); }
   if (action === 'add-time') {
@@ -406,6 +512,19 @@ document.addEventListener('click', event => {
   }
   if (action === 'task') { selectedTask={planId:button.dataset.plan,taskId:button.dataset.task}; sheet='task'; return renderSheet(); }
   if (action === 'plan') { selectedTask={planId:button.dataset.plan}; sheet='plan'; return renderSheet(); }
+  if (action === 'record-prn') {
+    const plan = plans.find(item => item.id === button.dataset.plan);
+    if (!plan || plan.mode !== 'asNeeded' || !plan.active || today() < plan.startDate || today() > plan.endDate) return toast('当前按需计划未生效');
+    const warnings = asNeededUseWarnings(plan);
+    const message = warnings.length
+      ? `${warnings.join('；')}。若已经实际服用，仍可如实记录；请勿据此再次服药，并向医生或药师咨询。确定记录这次已经发生的使用吗？`
+      : `确认记录刚刚已服用 ${plan.medicines[0].name} ${plan.medicines[0].dose}${plan.medicines[0].unit}？此操作只记录事实，不建议现在服药。`;
+    if (!confirm(message)) return;
+    const index = plans.indexOf(plan);
+    plans[index] = addAsNeededUse(plan);
+    save(); render(); toast('已记录这次使用');
+    return;
+  }
   if (action === 'delete-plan') {
     const index = plans.findIndex(plan => plan.id === button.dataset.plan);
     if (index < 0) return toast('计划不存在');

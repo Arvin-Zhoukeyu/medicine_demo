@@ -60,6 +60,7 @@ def matched_drug(text):
 
 def plan_answer(plans, today):
     rows = []
+    as_needed = []
     if not isinstance(plans, list):
         plans = []
     for plan in plans[:8]:
@@ -70,6 +71,9 @@ def plan_answer(plans, today):
             continue
         medicines = plan.get('medicines', [])
         if not isinstance(medicines, list):
+            continue
+        if plan.get('mode') == 'asNeeded':
+            as_needed.extend(str(med.get('name', ''))[:60] for med in medicines[:1] if isinstance(med, dict) and med.get('name'))
             continue
         for med in medicines[:3]:
             if not isinstance(med, dict):
@@ -83,10 +87,14 @@ def plan_answer(plans, today):
             for time in times[:6]:
                 if isinstance(time, str) and re.fullmatch(r'(?:[01]\d|2[0-3]):[0-5]\d', time) and name:
                     rows.append((time, name, dose, unit))
+    if not rows and as_needed:
+        return {'answer': '今天有按需计划：' + '、'.join(as_needed) + '。按需计划没有固定服药时刻；请查看计划中的说明书依据，不要把间隔或每日上限当作定时服药安排。',
+                'sources': [{'title': '当前浏览器中的已启用计划', 'url': ''}]}
     if not rows:
         return {'answer': '当前没有可供查询的今日计划。请先查看“计划”页，或核对计划日期。', 'sources': []}
     lines = [f'{time} {name} {dose}{unit}'.strip() for time, name, dose, unit in sorted(rows)[:18]]
-    return {'answer': '按当前已启用计划，今天安排：' + '；'.join(lines) + '。这是计划时间，不代表已经服用。',
+    extra = '；另有按需计划：' + '、'.join(as_needed) + '（无固定时刻）' if as_needed else ''
+    return {'answer': '按当前已启用计划，今天安排：' + '；'.join(lines) + '。这是计划时间，不代表已经服用' + extra + '。',
             'sources': [{'title': '当前浏览器中的已启用计划', 'url': ''}]}
 
 
